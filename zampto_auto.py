@@ -118,76 +118,131 @@ def parse_expiry_minutes(expiry_str: str) -> int:
         total += int(m.group(1))
     return total if total > 0 else -1
 
-# ---------- 关闭所有弹窗（广告 + GDPR）----------
+# ---------- 关闭所有弹窗（广告 + GDPR + Google Vignette）----------
 def dismiss_all_popups(page):
     """
     关闭页面上所有可能出现的弹窗：
-    1. 广告弹窗（有 Close 按钮，或含外部域名链接）
-    2. GDPR Cookie 同意弹窗
-    每次调用最多等待 5 秒，关掉后继续检测，最多循环 3 轮。
+    1. Google Vignette 广告（iframe 形式，需 JS 隐藏）
+    2. 普通广告弹窗（有 Close 按钮）
+    3. GDPR Cookie 同意弹窗
+    每次调用最多循环 4 轮，每轮间隔 0.8 秒。
     """
-    for round_idx in range(3):
+    for round_idx in range(4):
         closed_any = False
 
+        # ── Step A：用 JS 强制隐藏 Google Vignette iframe 及全屏遮罩 ──────
+        hidden = page.evaluate("""() => {
+            var count = 0;
+
+            // Google Vignette iframe（id 含 google_vignette 或 aswift）
+            document.querySelectorAll('iframe').forEach(function(f) {
+                if ((f.id && (f.id.includes('google_vignette') || f.id.includes('aswift'))) ||
+                    (f.name && f.name.includes('google_vignette'))) {
+                    // 隐藏 iframe 自身
+                    f.style.setProperty('display', 'none', 'important');
+                    // 隐藏其父容器（通常是 ins 或 div 包装）
+                    if (f.parentElement) {
+                        f.parentElement.style.setProperty('display', 'none', 'important');
+                        if (f.parentElement.parentElement) {
+                            f.parentElement.parentElement.style.setProperty('display', 'none', 'important');
+                        }
+                    }
+                    count++;
+                }
+            });
+
+            // 全屏固定遮罩（z-index 高的 fixed div，排除 renewModal 等正常弹窗）
+            document.querySelectorAll('div[style*="position: fixed"], div[style*="position:fixed"]').forEach(function(ov) {
+                if (!ov.offsetParent && ov.style.display === 'none') return;
+                var z = parseInt(window.getComputedStyle(ov).zIndex) || 0;
+                if (z >= 9000 && !ov.id.includes('renew') && !ov.id.includes('modal')) {
+                    ov.style.setProperty('display', 'none', 'important');
+                    count++;
+                }
+            });
+
+            // ins.adsbygoogle 广告容器
+            document.querySelectorAll('ins.adsbygoogle').forEach(function(ins) {
+                ins.style.setProperty('display', 'none', 'important');
+                count++;
+            });
+
+            return count;
+        }""")
+        if hidden and hidden > 0:
+            log.info(f"  [轮{round_idx+1}] JS 隐藏 {hidden} 个广告/遮罩元素")
+            closed_any = True
+
+        # ── Step B：点击页面内关闭按钮 ──────────────────────────────────
         closed = page.evaluate("""() => {
             var count = 0;
 
-            // ① 优先找带明确文字的关闭按钮（在弹窗容器内）
-            var closeTexts = ['Close', 'close', 'Schließen', '×', 'X'];
+            // ① 带明确文字的关闭按钮（在弹窗容器内）
+            var closeTexts = ['Close', 'close', 'Schließen', '×', 'X', 'CLOSE'];
             for (var t of closeTexts) {
                 var btns = Array.from(document.querySelectorAll('button, a, [role="button"]'));
                 for (var b of btns) {
                     if (b.innerText && b.innerText.trim() === t) {
-                        var parent = b.closest('[class*="modal"],[class*="popup"],[class*="overlay"],[class*="dialog"],[class*="ad-"]');
-                        if (parent) { b.click(); count++; break; }
+                        var parent = b.closest('[class*="modal"],[class*="popup"],[class*="overlay"],[class*="dialog"],[class*="ad-"],[class*="vignette"]');
+                        if (parent && parent.offsetParent !== null) { b.click(); count++; break; }
                     }
                 }
             }
 
-            // ② aria-label="Close" 的按钮
-            var ariaClose = document.querySelector('button[aria-label="Close"], button[aria-label="close"], [aria-label="Dismiss"]');
-            if (ariaClose) { ariaClose.click(); count++; }
+            // ② aria-label="Close" / "Dismiss"
+            var ariaClose = document.querySelector(
+                'button[aria-label="Close"], button[aria-label="close"], ' +
+                '[aria-label="Dismiss"], button[aria-label="CLOSE"]'
+            );
+            if (ariaClose && ariaClose.offsetParent !== null) { ariaClose.click(); count++; }
 
             // ③ GDPR：Nicht einwilligen / Decline / Reject / Do not consent
             var gdprTexts = ['Nicht einwilligen', 'Decline', 'Reject', 'Do not consent'];
             for (var gt of gdprTexts) {
                 var gb = Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim() === gt);
-                if (gb) { gb.click(); count++; break; }
+                if (gb && gb.offsetParent !== null) { gb.click(); count++; break; }
             }
 
-            // ④ Zampto continue-prompt 弹窗（class="continue-prompt-text" 或 close-button-protector）
+            // ④ Zampto continue-prompt / close-button-protector
             var cpClose = document.querySelector(
                 '.close-button-protector, .dismiss-button, .dismiss-button-protector, ' +
                 '[class*="continue-prompt"] button, [class*="close-button-protector"]'
             );
-            if (cpClose) { cpClose.click(); count++; }
+            if (cpClose && cpClose.offsetParent !== null) { cpClose.click(); count++; }
 
-            // ⑤ 任何可见的固定定位遮罩层（z-index 高），尝试点击其内部关闭按钮
+            // ⑤ 可见固定遮罩内的关闭按钮
             var overlays = Array.from(document.querySelectorAll('div[style*="position: fixed"], div[style*="position:fixed"]'));
             for (var ov of overlays) {
                 if (ov.offsetParent === null) continue;
-                var closeBtn = ov.querySelector('button, [role="button"], a');
-                if (closeBtn) { closeBtn.click(); count++; break; }
+                if (ov.id && (ov.id.includes('renew') || ov.id.includes('modal'))) continue;
+                var closeBtn = ov.querySelector('button[class*="close"], button[aria-label*="lose"], a[class*="close"]');
+                if (closeBtn && closeBtn.offsetParent !== null) { closeBtn.click(); count++; break; }
             }
 
             return count;
         }""")
 
         if closed and closed > 0:
-            log.info(f"  已关闭 {closed} 个弹窗（第 {round_idx+1} 轮）")
+            log.info(f"  [轮{round_idx+1}] 已点击关闭 {closed} 个弹窗")
             closed_any = True
             time.sleep(1)
 
-        # 检查是否还有可见弹窗
+        # ── Step C：检查是否还有可见弹窗 ────────────────────────────────
         has_popup = page.evaluate("""() => {
+            // 排除 renewModal 和隐藏元素
             var selectors = [
-                '[class*="modal"]:not([style*="display: none"])',
+                '[class*="modal"]:not([id*="renew"]):not([style*="display: none"])',
                 '[class*="popup"]:not([style*="display: none"])',
-                '[class*="overlay"]:not([style*="display: none"])',
+                '[class*="vignette"]:not([style*="display: none"])',
             ];
             for (var s of selectors) {
                 var el = document.querySelector(s);
                 if (el && el.offsetParent !== null) return true;
+            }
+            // 检查是否还有可见的 Google 广告 iframe
+            var iframes = document.querySelectorAll('iframe');
+            for (var f of iframes) {
+                if ((f.id && f.id.includes('google_vignette')) && f.style.display !== 'none') return true;
             }
             return false;
         }""")
@@ -196,10 +251,9 @@ def dismiss_all_popups(page):
             break
 
         if not closed_any:
-            # 没关掉也没新弹窗，退出
             break
 
-        time.sleep(1)
+        time.sleep(0.8)
 
 # ---------- CF Turnstile 等待 ----------
 def wait_cf_turnstile(page, timeout=60) -> bool:
@@ -344,6 +398,8 @@ def get_server_info(page, server_id: str) -> dict:
 
     time.sleep(3)
     take_screenshot(page, "02_server_page")
+    dismiss_all_popups(page)
+    time.sleep(1)
 
     info = page.evaluate("""() => {
         var body = document.body.innerText || '';
@@ -366,6 +422,8 @@ def get_server_info(page, server_id: str) -> dict:
         log.warning(f"访问 Console 页超时: {e}")
 
     time.sleep(3)
+    dismiss_all_popups(page)
+    time.sleep(1)
 
     status_text = page.evaluate("""() => {
         var statusEl = document.getElementById('serverStatus');
@@ -381,70 +439,88 @@ def get_server_info(page, server_id: str) -> dict:
     log.info(f"服务器信息: expiry={info.get('expiry')}, status={info.get('status')}, address=<已隐藏>")
     return info
 
-# ---------- 启动服务器 ----------
+# ---------- 启动服务器（含多次重试）----------
 def start_server(page) -> bool:
     console_url = f"{BASE_URL}/server-console?id={SERVER_ID}"
-    log.info(f"直接导航到 Console 页")
-    page.goto(console_url, timeout=30000, wait_until="domcontentloaded")
-    time.sleep(3)
-    take_screenshot(page, "03_console_page")
+    MAX_START_ATTEMPTS = 3  # 最多尝试点 Start 3 次
 
-    try:
-        # ✅ 先关弹窗再找 Start 按钮，防止弹窗拦截点击
+    for attempt in range(1, MAX_START_ATTEMPTS + 1):
+        log.info(f"直接导航到 Console 页（第 {attempt}/{MAX_START_ATTEMPTS} 次尝试）")
+        try:
+            page.goto(console_url, timeout=30000, wait_until="domcontentloaded")
+        except Exception as e:
+            log.warning(f"导航 Console 页超时: {e}")
+        time.sleep(3)
+
+        if attempt == 1:
+            take_screenshot(page, "03_console_page")
+
+        # ── 先清弹窗，再点 Start ──────────────────────────────────────
         dismiss_all_popups(page)
         time.sleep(1)
-        start_btn = page.locator('button:has-text("Start")').first
-        if start_btn.is_visible(timeout=5000):
-            start_btn.click()
-            log.info("✅ 已点击 Start 按钮")
-            time.sleep(5)
-            take_screenshot(page, "04_after_start")
-        else:
-            log.warning("Start 按钮不可见（服务器可能已在运行）")
-            # 可能已经在 Running，继续等待确认
-    except Exception as e:
-        log.warning(f"点击 Start 失败: {e}")
-        return False
 
-    # ── 轮询等待服务器真正变为 Running ──────────────────────────────────
-    log.info("⏳ 等待服务器变为 Running（最多 5 分钟）...")
-    wait_total = 300   # 最多等 300 秒
-    poll_interval = 10  # 每 10 秒刷新一次
-    elapsed = 0
-    final_status = "Unknown"
-
-    while elapsed < wait_total:
-        time.sleep(poll_interval)
-        elapsed += poll_interval
         try:
-            page.reload(timeout=20000, wait_until="domcontentloaded")
-            time.sleep(3)
-            # ✅ 关掉弹窗再读状态，防止 GDPR 弹窗遮挡状态文字
-            dismiss_all_popups(page)
-            time.sleep(1)
-            body = get_text(page)
-            # 优先匹配状态指示器文字
-            if "Running" in body:
-                final_status = "Running"
-                log.info(f"✅ 服务器已变为 Running（等待了 {elapsed}s）")
-                take_screenshot(page, f"05_running_confirmed")
-                break
-            elif "Starting" in body:
-                final_status = "Starting"
-                log.info(f"  [{elapsed}s] 还在 Starting，继续等待...")
-                take_screenshot(page, f"05_still_starting_{elapsed}s")
-            elif "Offline" in body or "Stopped" in body:
-                final_status = "Offline"
-                log.warning(f"  [{elapsed}s] 服务器回到 Offline，启动失败")
-                take_screenshot(page, f"05_start_failed_{elapsed}s")
-                break
+            start_btn = page.locator('button:has-text("Start")').first
+            if start_btn.is_visible(timeout=5000):
+                start_btn.click()
+                log.info(f"✅ 已点击 Start 按钮（第 {attempt} 次）")
+                time.sleep(5)
+                take_screenshot(page, f"04_after_start_attempt{attempt}")
             else:
-                log.info(f"  [{elapsed}s] 状态未知，继续等待...")
+                body_now = get_text(page)
+                if "Running" in body_now:
+                    log.info("Start 按钮不可见，页面已显示 Running，跳过点击")
+                    # 直接进入等待确认
+                else:
+                    log.warning(f"Start 按钮不可见且状态不是 Running，第 {attempt} 次跳过")
+                    continue
         except Exception as e:
-            log.warning(f"  [{elapsed}s] 刷新页面异常: {e}")
-    else:
-        log.warning(f"⚠️ 等待超时（{wait_total}s），最后状态: {final_status}")
-        take_screenshot(page, "05_start_timeout")
+            log.warning(f"点击 Start 失败（第 {attempt} 次）: {e}")
+            continue
+
+        # ── 轮询等待服务器真正变为 Running ──────────────────────────────
+        log.info("⏳ 等待服务器变为 Running（最多 3 分钟）...")
+        wait_total = 180   # 每次尝试最多等 3 分钟（比原来的 5 分钟短，失败后快速重试）
+        poll_interval = 10
+        elapsed = 0
+        final_status = "Unknown"
+
+        while elapsed < wait_total:
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+            try:
+                page.reload(timeout=20000, wait_until="domcontentloaded")
+                time.sleep(3)
+                dismiss_all_popups(page)  # 每次刷新后清弹窗
+                time.sleep(1)
+                body = get_text(page)
+                if "Running" in body:
+                    final_status = "Running"
+                    log.info(f"✅ 服务器已变为 Running（第 {attempt} 次尝试，等待了 {elapsed}s）")
+                    take_screenshot(page, f"05_running_confirmed_attempt{attempt}")
+                    break
+                elif "Starting" in body:
+                    final_status = "Starting"
+                    log.info(f"  [{elapsed}s] 还在 Starting，继续等待...")
+                elif "Offline" in body or "Stopped" in body:
+                    final_status = "Offline"
+                    log.warning(f"  [{elapsed}s] 服务器回到 Offline，本次启动失败")
+                    take_screenshot(page, f"05_start_failed_attempt{attempt}_{elapsed}s")
+                    break
+                else:
+                    log.info(f"  [{elapsed}s] 状态未知，继续等待...")
+            except Exception as e:
+                log.warning(f"  [{elapsed}s] 刷新页面异常: {e}")
+        else:
+            log.warning(f"⚠️ 第 {attempt} 次等待超时（{wait_total}s），最后状态: {final_status}")
+            take_screenshot(page, f"05_start_timeout_attempt{attempt}")
+
+        if final_status == "Running":
+            break  # 成功，退出重试循环
+
+        if attempt < MAX_START_ATTEMPTS:
+            log.info(f"⏳ 第 {attempt} 次失败，{5}s 后重试...")
+            time.sleep(5)
 
     if final_status != "Running":
         return False
@@ -503,6 +579,8 @@ def start_server(page) -> bool:
                         try:
                             page.reload(timeout=20000, wait_until="domcontentloaded")
                             time.sleep(3)
+                            dismiss_all_popups(page)
+                            time.sleep(1)
                             body2 = get_text(page)
                             if "Running" in body2:
                                 log.info(f"✅ Restart 后面板已变为 Running（等待了 {elapsed2}s）")
