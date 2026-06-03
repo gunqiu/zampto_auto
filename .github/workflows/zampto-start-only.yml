@@ -9,6 +9,14 @@ on:
         description: '手动触发原因'
         required: false
         default: '手动测试'
+      enable_recording:
+        description: '录屏（true=录屏，false=不录屏）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 jobs:
   restart:
@@ -66,6 +74,7 @@ jobs:
           SKIP_RENEW:       "true"
           UPTIME_STATUS:    ${{ github.event.client_payload.status }}
           UPTIME_HEARTBEAT: ${{ toJson(github.event.client_payload.heartbeat) }}
+          ENABLE_RECORDING: ${{ github.event.inputs.enable_recording || 'false' }}
           DISPLAY:          ":99"
           LIBGL_ALWAYS_SOFTWARE: "1"
           GALLIUM_DRIVER:   "llvmpipe"
@@ -74,18 +83,25 @@ jobs:
           XVFB_PID=$!
           sleep 2
 
-          ffmpeg -f x11grab -video_size 1280x720 -framerate 10 -i :99 \
-            -codec:v libx264 -preset ultrafast -crf 30 \
-            -pix_fmt yuv420p -movflags +faststart /tmp/recording.mp4 \
-            > /tmp/ffmpeg.log 2>&1 &
-          RECORD_PID=$!
-          sleep 2
+          # 仅在 ENABLE_RECORDING=true 时启动录屏
+          RECORD_PID=""
+          if [ "$ENABLE_RECORDING" = "true" ]; then
+            echo "🎬 录屏已启用"
+            ffmpeg -f x11grab -video_size 1280x720 -framerate 10 -i :99 \
+              -codec:v libx264 -preset ultrafast -crf 30 \
+              -pix_fmt yuv420p -movflags +faststart /tmp/recording.mp4 \
+              > /tmp/ffmpeg.log 2>&1 &
+            RECORD_PID=$!
+            sleep 2
+          else
+            echo "🎬 录屏未启用（如需录屏，手动触发时选择 enable_recording=true）"
+          fi
 
           timeout 600 python zampto_auto.py || echo "脚本退出码: $?"
 
           sleep 2
-          kill $RECORD_PID 2>/dev/null || true
-          wait $RECORD_PID 2>/dev/null || true
+          [ -n "$RECORD_PID" ] && kill $RECORD_PID 2>/dev/null || true
+          [ -n "$RECORD_PID" ] && wait $RECORD_PID 2>/dev/null || true
           kill $XVFB_PID 2>/dev/null || true
 
       - name: 上传截图和录屏
@@ -95,8 +111,8 @@ jobs:
           name: emergency-${{ github.run_number }}
           path: |
             ./screenshots/*.png
-            /tmp/recording.mp4
-            /tmp/ffmpeg.log
+            ${{ github.event.inputs.enable_recording == 'true' && '/tmp/recording.mp4' || '' }}
+            ${{ github.event.inputs.enable_recording == 'true' && '/tmp/ffmpeg.log' || '' }}
           if-no-files-found: ignore
           retention-days: 3
 
