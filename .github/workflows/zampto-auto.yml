@@ -59,8 +59,8 @@ jobs:
         run: |
           curl -sL https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 -o hysteria
           chmod +x hysteria
-          echo "$HY2_CONFIG" > config.json
-          ./hysteria client -c config.json &
+          echo "$HY2_CONFIG" > config.yaml
+          ./hysteria client -c config.yaml &
           sleep 5
           echo "直连 IP：$(curl -s --max-time 5 ifconfig.me || echo '失败')"
           echo "代理 IP：$(curl -s --max-time 10 --socks5 127.0.0.1:1080 ifconfig.me || echo '代理失败，请检查 HY2_CONFIG')"
